@@ -1,0 +1,497 @@
+# =============================================================================
+# COMPREHENSIVE .GITIGNORE FOR FULL-STACK PROJECTS
+# =============================================================================
+# Python, Django, Node.js, React, AI/ML, Images, Models, etc.
+
+# =============================================================================
+# PYTHON & DJANGO
+# =============================================================================
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+virtualenv/
+.virtualenv/
+
+# Django specific
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+media/uploads/
+staticfiles/
+static/admin/
+static/rest_framework/
+
+# Django migrations (optional - comment out if you want to track them)
+# */migrations/*.py
+# */migrations/*.pyc
+# !*/migrations/__init__.py
+
+# Django secret keys and settings
+.env
+.env.local
+.env.production
+settings_local.py
+secrets.json
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# =============================================================================
+# NODE.JS & NPM/YARN
+# =============================================================================
+
+# Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+
+# Runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage directory used by tools like istanbul
+coverage/
+*.lcov
+
+# nyc test coverage
+.nyc_output/
+
+# Dependency directories
+jspm_packages/
+
+# Snowpack dependency directory (https://snowpack.dev/)
+web_modules/
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Optional npm cache directory
+.npm
+
+# Optional eslint cache
+.eslintcache
+
+# Optional stylelint cache
+.stylelintcache
+
+# Microbundle cache
+.rpt2_cache/
+.rts2_cache_cjs/
+.rts2_cache_es/
+.rts2_cache_umd/
+
+# Optional REPL history
+.node_repl_history
+
+# Output of 'npm pack'
+*.tgz
+
+# Yarn Integrity file
+.yarn-integrity
+
+# Package manager files
+yarn.lock
+package-lock.json
+pnpm-lock.yaml
+
+# =============================================================================
+# REACT & FRONTEND BUILD
+# =============================================================================
+
+# Production builds
+build/
+dist/
+out/
+
+# React specific
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Next.js
+.next/
+.vercel/
+
+# Nuxt.js
+.nuxt/
+.output/
+
+# Gatsby files
+.cache/
+public/
+
+# Vuepress build output
+.vuepress/dist/
+
+# Serverless directories
+.serverless/
+
+# FuseBox cache
+.fusebox/
+
+# DynamoDB Local files
+.dynamodb/
+
+# TernJS port file
+.tern-port
+
+# Stores VSCode versions used for testing VSCode extensions
+.vscode-test/
+
+# =============================================================================
+# AI/ML & DATA SCIENCE
+# =============================================================================
+
+# Model files (large binary files)
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.joblib
+*.model
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+
+# PyTorch Lightning
+lightning_logs/
+mlruns/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb
+
+# Tensorboard logs
+runs/
+logs/
+tensorboard/
+
+# MLflow
+mlruns/
+mlartifacts/
+
+# Weights & Biases
+wandb/
+
+# FAISS indexes
+*.index
+*.faiss
+*.ivf
+
+# Datasets (usually large)
+data/
+datasets/
+*.csv
+*.tsv
+*.json
+*.jsonl
+*.parquet
+
+# Trained embeddings
+embeddings/
+vectors/
+*.npy
+*.npz
+
+# Model checkpoints
+checkpoints/
+saved_models/
+models/
+
+# CUDA cache
+.nv/
+
+# =============================================================================
+# IMAGES & MEDIA FILES
+# =============================================================================
+
+# Image files
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.bmp
+*.tiff
+*.tif
+*.webp
+*.svg
+*.ico
+
+# Raw image formats
+*.raw
+*.cr2
+*.nef
+*.arw
+*.dng
+
+# Video files
+*.mp4
+*.avi
+*.mov
+*.wmv
+*.flv
+*.webm
+*.mkv
+*.m4v
+
+# Audio files
+*.mp3
+*.wav
+*.flac
+*.aac
+*.ogg
+*.wma
+
+# Processed media directories
+processed_images/
+processed_enhanced/
+test_simple_fixed/
+processed_clean/
+media_cache/
+thumbnails/
+
+# =============================================================================
+# DATABASES
+# =============================================================================
+
+# SQLite
+*.sqlite
+*.sqlite3
+*.db
+
+# PostgreSQL
+*.dump
+*.sql
+
+# MySQL
+*.mwb
+*.mwb.bak
+
+# Redis
+dump.rdb
+
+# =============================================================================
+# LOGS & TEMPORARY FILES
+# =============================================================================
+
+# Log files
+*.log
+logs/
+log/
+*.log.*
+
+# Temporary files
+tmp/
+temp/
+.tmp/
+.temp/
+*.tmp
+*.temp
+
+# Cache directories
+.cache/
+cache/
+.parcel-cache/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# =============================================================================
+# IDE & EDITOR FILES
+# =============================================================================
+
+# VSCode
+.vscode/
+*.code-workspace
+
+# PyCharm
+.idea/
+*.iws
+*.iml
+*.ipr
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.\#*
+
+# JetBrains
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# =============================================================================
+# CLOUD & DEPLOYMENT
+# =============================================================================
+
+# AWS
+.aws/
+
+# Docker
+.dockerignore
+docker-compose.override.yml
+
+# Heroku
+.heroku/
+
+# Vercel
+.vercel/
+
+# Netlify
+.netlify/
+
+# =============================================================================
+# CERTIFICATES & KEYS
+# =============================================================================
+
+# SSL certificates
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
+
+# SSH keys
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+
+# API keys and secrets
+.secrets
+secrets.yml
+.env.secret
+
+# =============================================================================
+# BACKUP & ARCHIVE FILES
+# =============================================================================
+
+# Backups
+*.bak
+*.backup
+*.old
+*.orig
+*backup*
+pipeline_backup*/
+
+# Archives
+*.zip
+*.tar.gz
+*.tar.bz2
+*.rar
+*.7z
+
+# =============================================================================
+# PROJECT SPECIFIC (YOUR PRICE TRACKER)
+# =============================================================================
+
+# Your specific directories
+pipeline_reports/
+pipeline_backups/
+pipeline_temp/
+test_results/
+processed_*/
+
+# Configuration files with sensitive data
+pipeline_config.yaml
+config_local.yml
+
+# Large model files
+resnet50_weights.pth
+faiss_indices/
+vector_cache/
+
+# Processing outputs
+*.processing_report
+processing_stats.json
+
+# =============================================================================
+# OPTIONAL SECTIONS (UNCOMMENT IF NEEDED)
+# =============================================================================
+
+# If you want to track some images (product samples, etc.)
+# !sample_images/*.jpg
+# !test_images/*.png
+
+# If you want to track some models
+# !models/small_model.pkl
+
+# If you want to track some configs
+# !config/default_config.yml
+
+# =============================================================================
+# CUSTOM EXCEPTIONS
+# =============================================================================
+
+# Add any specific files you want to track despite the rules above
+# !important_file.jpg
+# !config/production.env
+# !models/lightweight_model.pkl
+
+
+*.log
+*.log.*

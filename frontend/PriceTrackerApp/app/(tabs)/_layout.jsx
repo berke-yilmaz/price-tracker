@@ -1,4 +1,4 @@
-// app/(tabs)/_layout.jsx
+// app/(tabs)/_layout.jsx - FIXED VERSION (English)
 import React from 'react';
 import { Tabs } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -18,40 +18,50 @@ export default function TabsLayout() {
             iconName = focused ? 'time' : 'time-outline';
           } else if (route.name === 'profile') {
             iconName = focused ? 'person' : 'person-outline';
+          } else if (route.name === 'search') {
+            iconName = focused ? 'search' : 'search-outline';
           }
 
           return <Ionicons name={iconName} size={size} color={color} />;
         },
         tabBarActiveTintColor: '#007AFF',
         tabBarInactiveTintColor: 'gray',
+        headerShown: false,
       })}
     >
       <Tabs.Screen
         name="index"
         options={{
-          title: 'Anasayfa',
-          headerTitle: 'Price Tracker',
+          title: 'Home',
+          tabBarLabel: 'Home',
         }}
       />
       <Tabs.Screen
         name="scan"
         options={{
-          title: 'Tarat',
-          headerTitle: 'Ürün Tarat',
+          title: 'Scan',
+          tabBarLabel: 'Scan',
+        }}
+      />
+      <Tabs.Screen
+        name="search"
+        options={{
+          title: 'Search',
+          tabBarLabel: 'Search',
         }}
       />
       <Tabs.Screen
         name="history"
         options={{
-          title: 'Geçmiş',
-          headerTitle: 'Fiyat Geçmişi',
+          title: 'History',
+          tabBarLabel: 'History',
         }}
       />
       <Tabs.Screen
         name="profile"
         options={{
-          title: 'Profil',
-          headerTitle: 'Profil',
+          title: 'Profile',
+          tabBarLabel: 'Profile',
         }}
       />
     </Tabs>

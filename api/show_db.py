@@ -8,7 +8,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'PriceTracker.settings')
 django.setup()
 
-from products.models import Product, Price
+from models import Product, Price
 from django.contrib.auth.models import User
 
 def show_database_contents():

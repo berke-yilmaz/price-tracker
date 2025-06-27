@@ -1,0 +1,444 @@
+# api/util.py - FINAL COMPLETE VERSION (WITH V9 PIPELINE)
+import os
+import io
+import re
+import time
+import numpy as np
+import logging
+from typing import List, Dict, Optional, Union, Tuple
+from functools import lru_cache
+import cv2
+
+# --- Core Library Imports ---
+import torch
+import torchvision.models as models
+import torchvision.transforms as transforms
+from torchvision.models import ResNet50_Weights
+import faiss
+from PIL import Image, ImageEnhance, ImageOps, ImageFilter
+from sklearn.cluster import KMeans
+from sentence_transformers import SentenceTransformer
+import colorsys
+from google.cloud import vision
+
+# --- Local Imports ---
+from .models import Product
+from django.conf import settings
+import hashlib
+
+
+# --- Setup ---
+logger = logging.getLogger(__name__)
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
+# --- NEW: Import rembg with a fallback ---
+try:
+    from rembg import remove, new_session
+    REMBG_AVAILABLE = True
+    logger.info("✅ 'rembg' library loaded successfully for background removal.")
+except ImportError:
+    remove, new_session = None, None
+    REMBG_AVAILABLE = False
+    logger.warning("⚠️ 'rembg' not found. Background removal is disabled. Run 'pip install rembg'.")
+
+if hasattr(Image, 'Resampling'):
+    RESAMPLING_FILTER = Image.Resampling.LANCZOS
+else:
+    RESAMPLING_FILTER = Image.ANTIALIAS
+
+
+# =============================================================================
+# ⭐ PROCESS-SAFE MODEL CACHING ⭐
+# =============================================================================
+_MODEL_CACHE = {}
+def get_process_safe_model(model_key: str, loader_func):
+    pid = os.getpid()
+    cache_key = f"{model_key}_{pid}"
+    if cache_key not in _MODEL_CACHE:
+        logger.info(f"Process {pid}: Loading model '{model_key}'...")
+        _MODEL_CACHE[cache_key] = loader_func()
+        logger.info(f"Process {pid}: Model '{model_key}' loaded and cached.")
+    return _MODEL_CACHE[cache_key]
+
+# --- Specific Model Loaders ---
+def _load_resnet():
+    device = torch.device("cpu")
+    model = models.resnet50(weights=ResNet50_Weights.IMAGENET1K_V2).to(device)
+    feature_extractor = torch.nn.Sequential(*list(model.children())[:-1])
+    feature_extractor.eval()
+    return feature_extractor
+
+def _load_sentence_transformer():
+    return SentenceTransformer('distiluse-base-multilingual-cased-v1')
+
+# --- NEW: Add rembg session to cache ---
+def _load_rembg_session():
+    return new_session("u2net")
+
+def get_resnet_model():
+    return get_process_safe_model('resnet', _load_resnet)
+
+def get_sentence_transformer_model():
+    return get_process_safe_model('sentence_transformer', _load_sentence_transformer)
+
+# --- NEW: Function to get the rembg session ---
+def get_rembg_session():
+    if not REMBG_AVAILABLE: return None
+    return get_process_safe_model('rembg_session', _load_rembg_session)
+
+
+# =============================================================================
+# ⭐ GOOGLE VISION CLIENT (NOT CACHED) ⭐
+# ... (this section is unchanged) ...
+# =============================================================================
+def get_google_vision_client() -> Optional[vision.ImageAnnotatorClient]:
+    try:
+        return vision.ImageAnnotatorClient()
+    except Exception as e:
+        logger.error(f"Failed to create Google Vision client instance: {e}")
+        return None
+
+
+# =============================================================================
+# ⭐ VECTOR INDEX (FAISS) MANAGEMENT (RESTORED) ⭐
+# ... (this section is unchanged) ...
+# =============================================================================
+class SimpleVectorIndex:
+    """FAISS index with color awareness."""
+    def __init__(self, dimension=2048):
+        self.dimension = dimension
+        self.color_indices = {}
+        all_colors = [choice[0] for choice in Product.COLOR_CHOICES]
+        for color in all_colors:
+            self.color_indices[color] = {'index': faiss.IndexFlatL2(self.dimension), 'product_ids': []}
+
+    def add_product(self, product_id: int, feature_vector: np.ndarray, color_category: str):
+        if color_category not in self.color_indices: color_category = 'unknown' 
+        index_data = self.color_indices[color_category]
+        index_data['index'].add(np.array([feature_vector], dtype=np.float32))
+        index_data['product_ids'].append(product_id)
+
+    def search(self, feature_vector: np.ndarray, search_categories: List[str], k: int) -> List[Dict]:
+        all_results = []
+        categories_to_search = set(search_categories)
+        if not categories_to_search: categories_to_search.add('unknown')
+            
+        for category in categories_to_search:
+            if category not in self.color_indices: continue
+            index_data = self.color_indices[category]
+            if index_data['index'].ntotal == 0: continue
+            
+            k_for_category = min(k, index_data['index'].ntotal)
+            distances, indices = index_data['index'].search(np.array([feature_vector], dtype=np.float32), k_for_category)
+            
+            for i, dist in zip(indices[0], distances[0]):
+                if i != -1:
+                    all_results.append({
+                        'product_id': index_data['product_ids'][i],
+                        'distance': float(dist),
+                        'color_category': category
+                    })
+        
+        unique_results = {res['product_id']: res for res in sorted(all_results, key=lambda x: x['distance'])}
+        return sorted(list(unique_results.values()), key=lambda x: x['distance'])[:k]
+
+def _build_full_vector_index():
+    """Builds the FAISS index from all processed products in the DB."""
+    vector_index = SimpleVectorIndex()
+    products_with_features = Product.objects.filter(
+        processing_status='completed', 
+        visual_embedding__isnull=False
+    ).values_list('id', 'visual_embedding', 'color_category')
+    
+    for p_id, p_embedding, p_color in products_with_features:
+        if p_embedding:
+            vector_index.add_product(p_id, np.array(p_embedding, dtype=np.float32), p_color)
+            
+    return vector_index
+
+def get_vector_index():
+    return get_process_safe_model('vector_index', _build_full_vector_index)
+
+def build_vector_index():
+    """Force a rebuild of the vector index in the current process cache."""
+    pid = os.getpid()
+    cache_key = f"vector_index_{pid}"
+    if cache_key in _MODEL_CACHE:
+        del _MODEL_CACHE[cache_key]
+    logger.info(f"Process {pid}: Cleared old vector index. It will be rebuilt on next access.")
+    return get_vector_index()
+
+
+# =============================================================================
+# CORE AI & IMAGE PROCESSING FUNCTIONS
+# =============================================================================
+def debug_save_image(image: Image.Image, step_name: str, run_id: int):
+    """Saves an image to a debug directory if settings.DEBUG is True."""
+    if not settings.DEBUG: return
+    try:
+        debug_dir = os.path.join(settings.BASE_DIR, 'tmp', 'debug_pipeline', str(run_id))
+        os.makedirs(debug_dir, exist_ok=True)
+        image_path = os.path.join(debug_dir, f"{step_name}.png")
+        image.save(image_path, "PNG")
+        logger.info(f"Saved debug image: {image_path}")
+    except Exception as e:
+        logger.error(f"Could not save debug image for step {step_name}: {e}")
+
+def assess_image_quality(cv_image: np.ndarray) -> Tuple[str, dict]:
+    """Performs IQA. Tuned thresholds for better real-world rejection."""
+    gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
+    blur = cv2.Laplacian(gray, cv2.CV_64F).var()
+    brightness = np.mean(gray)
+    contrast = np.std(gray)
+    scores = {"blur": blur, "brightness": brightness, "contrast": contrast}
+    if blur < 45.0 or contrast < 22.0: return 'BAD_REJECT', scores # Slightly more lenient
+    if brightness < 40.0 or brightness > 220.0: return 'POOR_RECOVERABLE', scores
+    return 'GOOD', scores
+
+def is_mask_valid(mask_array: np.ndarray, threshold_ratio=0.03) -> bool:
+    """Checks if a mask contains a reasonably sized object."""
+    mask_area = np.sum(mask_array > 0) # Count non-zero pixels
+    total_area = mask_array.shape[0] * mask_array.shape[1]
+    if total_area == 0: return False
+    area_ratio = mask_area / total_area
+    logger.info(f"Mask Validation: Area Ratio = {area_ratio:.4f} (Threshold: {threshold_ratio})")
+    return area_ratio > threshold_ratio
+
+
+# --- NEW: The V9 Preprocessing Pipeline using `rembg` ---
+def calculate_iou(mask1: np.ndarray, mask2: np.ndarray) -> float:
+    """Calculates Intersection over Union (IoU) for two masks."""
+    intersection = np.logical_and(mask1, mask2)
+    union = np.logical_or(mask1, mask2)
+    iou_score = np.sum(intersection) / np.sum(union)
+    return iou_score if not np.isnan(iou_score) else 0
+
+@lru_cache(maxsize=128)
+def preprocess_for_recognition_v14(image_bytes: bytes) -> Image.Image:
+    """
+    THE V14 "TRUST, BUT VERIFY" PIPELINE
+    This version adds a critical verification step: after attempting to refine the
+    AI mask with GrabCut, it checks if the refinement was successful. If not,
+    it discards the refinement and uses the original, reliable AI mask.
+    """
+    run_id = int(hashlib.md5(image_bytes).hexdigest(), 16) % 100000
+    logger.info(f"🚀 Starting V14 'Trust, but Verify' Pipeline for run_id {run_id}...")
+
+    try:
+        # --- STAGE 1: IQA and Denoising (Shared) ---
+        original_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        open_cv_image = cv2.cvtColor(np.array(original_image), cv2.COLOR_RGB2BGR)
+        if assess_image_quality(open_cv_image)[0] == 'BAD_REJECT': raise ValueError("Image quality too low.")
+        denoised_image = cv2.bilateralFilter(open_cv_image, d=9, sigmaColor=75, sigmaSpace=75)
+        
+        # --- STAGE 2: SEGMENTATION ---
+        final_mask_array = None
+        
+        # --- PATH A: AI-First Attempt ---
+        if REMBG_AVAILABLE:
+            try:
+                ai_mask_pil = Image.open(io.BytesIO(remove(image_bytes, session=get_rembg_session()))).getchannel('A')
+                ai_mask_array = np.array(ai_mask_pil)
+                if is_mask_valid(ai_mask_array):
+                    logger.info(f"V14 (run_id: {run_id}): AI Mask is VALID. Attempting refinement...")
+                    debug_save_image(ai_mask_pil, "2_v14_ai_mask_raw", run_id)
+                    
+                    # Attempt refinement
+                    cv_for_refine = cv2.resize(open_cv_image, ai_mask_pil.size)
+                    refine_mask = np.zeros(cv_for_refine.shape[:2], np.uint8)
+                    refine_mask[ai_mask_array == 0] = cv2.GC_BGD
+                    refine_mask[ai_mask_array > 0] = cv2.GC_PR_FGD
+                    bgdModel, fgdModel = np.zeros((1,65),np.float64), np.zeros((1,65),np.float64)
+                    cv2.grabCut(cv_for_refine, refine_mask, None, bgdModel, fgdModel, 5, cv2.GC_INIT_WITH_MASK)
+                    refined_mask_array = np.where((refine_mask==cv2.GC_BGD)|(refine_mask==cv2.GC_PR_BGD), 0, 1)
+
+                    # *** THE "TRUST, BUT VERIFY" STEP ***
+                    iou_score = calculate_iou(ai_mask_array > 0, refined_mask_array > 0)
+                    logger.info(f"V14 (run_id: {run_id}): Refinement IoU Score: {iou_score:.4f}")
+                    if iou_score > 0.80:
+                        logger.info("V14: Refinement SUCCEEDED. Using refined mask.")
+                        final_mask_array = refined_mask_array.astype('uint8')
+                        debug_save_image(Image.fromarray(final_mask_array * 255), "3_v14_mask_refined_SUCCESS", run_id)
+                    else:
+                        logger.warning("V14: Refinement FAILED (IoU too low). Using raw AI mask.")
+                        final_mask_array = (ai_mask_array > 0).astype('uint8')
+                        debug_save_image(Image.fromarray(final_mask_array * 255), "3_v14_mask_refined_FAILED", run_id)
+                else:
+                    logger.warning(f"V14 (run_id: {run_id}): AI Mask is INVALID. Triggering CV Failsafe.")
+            except Exception as e:
+                logger.error(f"V14 (run_id: {run_id}): AI Path error: {e}. Triggering CV Failsafe.")
+
+        # --- PATH B: CV Failsafe (If AI Path Fails) ---
+        if final_mask_array is None:
+            # ... (The CV Failsafe path is unchanged from v13) ...
+            logger.info(f"V14 (run_id: {run_id}): Executing CV Failsafe Path.")
+            gray = cv2.cvtColor(denoised_image, cv2.COLOR_BGR2GRAY)
+            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+            _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if not contours: raise ValueError("CV Failsafe could not find contours.")
+            largest_contour = max(contours, key=cv2.contourArea)
+            rect = cv2.boundingRect(largest_contour)
+            mask = np.zeros(denoised_image.shape[:2], np.uint8)
+            bgdModel, fgdModel = np.zeros((1,65),np.float64), np.zeros((1,65),np.float64)
+            cv2.grabCut(denoised_image, mask, rect, bgdModel, fgdModel, 5, cv2.GC_INIT_WITH_RECT)
+            final_mask_array = np.where((mask==2)|(mask==0), 0, 1).astype('uint8')
+
+        # --- STAGE 3 & 4: POST-PROCESSING & COMPOSITING (Unchanged) ---
+        final_mask = Image.fromarray(final_mask_array * 255)
+        denoised_resized = cv2.resize(denoised_image, final_mask.size, interpolation=cv2.INTER_AREA)
+        isolated = cv2.bitwise_and(denoised_resized, denoised_resized, mask=final_mask_array)
+        wb = cv2.xphoto.createSimpleWB(); balanced = wb.balanceWhite(isolated)
+        lab = cv2.cvtColor(balanced, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab); clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8)); cl = clahe.apply(l)
+        corrected_lab = cv2.merge((cl,a,b)); corrected_product = cv2.cvtColor(corrected_lab, cv2.COLOR_LAB2BGR)
+        canvas = Image.new('RGB', final_mask.size, (255, 255, 255))
+        canvas.paste(Image.fromarray(cv2.cvtColor(corrected_product, cv2.COLOR_BGR2RGB)), (0, 0), final_mask)
+        bbox = canvas.getbbox()
+        cropped = canvas.crop(bbox) if bbox else canvas
+        final_image = ImageOps.expand(cropped, border=20, fill=(255, 255, 255))
+        final_image.thumbnail((512, 512), RESAMPLING_FILTER)
+        debug_save_image(final_image, "final_v14_standardized", run_id)
+        
+        logger.info(f"✅ V14 Pipeline completed for run_id {run_id}.")
+        return final_image
+        
+    except Exception as e:
+        logger.error(f"V14 Pipeline FAILED for run_id {run_id}: {e}", exc_info=True)
+        return Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    
+# --- This helper function is unchanged ---
+def _get_bytes_from_input(image_input: Union[Image.Image, bytes, io.BytesIO]) -> bytes:
+    if isinstance(image_input, bytes): return image_input
+    if isinstance(image_input, io.BytesIO): return image_input.getvalue()
+    if isinstance(image_input, Image.Image):
+        with io.BytesIO() as output: format = 'PNG' if image_input.mode == 'RGBA' else 'JPEG'; image_input.save(output, format=format); return output.getvalue()
+    raise TypeError("Unsupported image input type")
+
+def extract_visual_features_resnet(image_input: Union[Image.Image, bytes, io.BytesIO], **kwargs) -> np.ndarray:
+    try:
+        image_bytes = _get_bytes_from_input(image_input)
+        processed_image = preprocess_for_recognition_v14(image_bytes)
+        preprocess_transform = transforms.Compose([transforms.Resize(256), transforms.CenterCrop(224), transforms.ToTensor(), transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),])
+        img_tensor = preprocess_transform(processed_image).unsqueeze(0); model = get_resnet_model()
+        with torch.no_grad(): features = model(img_tensor)
+        return features.cpu().numpy().reshape(-1)
+    except Exception as e: logger.error(f"Feature extraction failed: {e}", exc_info=True); return np.zeros(2048, dtype=np.float32)
+
+def categorize_by_color(image_input: Union[Image.Image, bytes, io.BytesIO]) -> Dict:
+    try:
+        image_bytes = _get_bytes_from_input(image_input)
+        processed_image = preprocess_for_recognition_v14(image_bytes)
+        img_for_color = processed_image.resize((150, 150), RESAMPLING_FILTER)
+        pixels = np.array(img_for_color).reshape(-1, 3)
+        mask = (np.mean(pixels, axis=1) > 15) & (np.mean(pixels, axis=1) < 240)
+        filtered_pixels = pixels[mask]
+        if len(filtered_pixels) < 10: kmeans = KMeans(n_clusters=min(5, len(pixels) if len(pixels)>0 else 1), random_state=42, n_init='auto').fit(pixels if len(pixels)>0 else [[128,128,128]])
+        else: kmeans = KMeans(n_clusters=min(5, len(filtered_pixels)), random_state=42, n_init='auto').fit(filtered_pixels)
+        dominant_colors = kmeans.cluster_centers_.astype(int).tolist()
+        color_votes, total_weight = {}, 0
+        for i, rgb in enumerate(dominant_colors):
+            weight = 1.0 / (i + 1); total_weight += weight; r, g, b = [x/255.0 for x in rgb]; h, s, v = colorsys.rgb_to_hsv(r, g, b); h, s, v = h*360, s*100, v*100
+            category = 'black' if v < 15 else 'white' if v > 85 and s < 15 else 'white' if s < 20 and v > 60 else 'black' if s < 20 else 'brown' if 10 <= h <= 30 and 30 <= s <= 100 and 15 <= v <= 65 else 'red' if h >= 345 or h <= 15 else 'orange' if 15 < h <= 45 else 'yellow' if 45 < h <= 75 else 'green' if 75 < h <= 150 else 'blue' if 150 < h <= 250 else 'purple' if 250 < h <= 300 else 'pink' if 300 < h < 345 else 'unknown'
+            color_votes[category] = color_votes.get(category, 0) + weight
+        best_category, secondary_category, confidence = 'unknown', None, 0.0
+        if color_votes:
+            sorted_votes = sorted(color_votes.items(), key=lambda item: item[1], reverse=True)
+            if sorted_votes: best_category = sorted_votes[0][0]; confidence = sorted_votes[0][1] / total_weight if total_weight > 0 else 0.0;
+            if len(sorted_votes) > 1: secondary_category = sorted_votes[1][0]
+            if confidence < 0.3: best_category = 'unknown'
+        return {'category': best_category, 'secondary_category': secondary_category, 'confidence': confidence, 'colors': dominant_colors}
+    except Exception as e: logger.error(f"Color analysis FAILED: {e}", exc_info=True); return {'category': 'unknown', 'secondary_category': None, 'confidence': 0.0, 'colors': []}
+
+
+# --- The remaining functions are unchanged ---
+def get_color_aware_text_embedding(text: str, color_category: str) -> np.ndarray:
+    model = get_sentence_transformer_model(); color_map = {choice[0]: choice[1] for choice in Product.COLOR_CHOICES}; enhanced_text = f"{text} {color_map.get(color_category, '')}".strip(); return model.encode(enhanced_text)
+    
+def extract_text_from_product_image(image_bytes: bytes) -> Dict:
+    client = get_google_vision_client()
+    if not client: return {'success': False, 'error': 'Google Vision client could not be created', 'text': ''}
+    try:
+        image = vision.Image(content=image_bytes)
+        response = client.text_detection(image=image)
+        if response.error.message: raise Exception(f"Vision API Error: {response.error.message}")
+        full_text = response.text_annotations[0].description if response.text_annotations else ""
+        return {'success': True, 'text': full_text}
+    except Exception as e:
+        logger.error(f"OCR with Google Vision failed: {e}"); return {'success': False, 'error': str(e), 'text': ''}
+        
+def identify_product(image_input: Union[Image.Image, bytes, io.BytesIO], similarity_threshold: float = 0.7) -> Optional[Product]:
+    try:
+        image_bytes = _get_bytes_from_input(image_input); visual_features = extract_visual_features_resnet(image_bytes); vector_index = get_vector_index()
+        if all(v['index'].ntotal == 0 for v in vector_index.color_indices.values()): logger.warning("Identify Product: Vector index is empty."); return None
+        all_categories = list(vector_index.color_indices.keys()); candidates = vector_index.search(visual_features, search_categories=all_categories, k=1)
+        if not candidates: return None
+        best_candidate = candidates[0]; similarity = max(0.0, 1.0 - (best_candidate['distance'] / 150.0))
+        logger.info(f"Identify Product: Best match is product ID {best_candidate['product_id']} with similarity {similarity:.2f}")
+        if similarity >= similarity_threshold: return Product.objects.get(id=best_candidate['product_id'])
+        return None
+    except Product.DoesNotExist: return None
+    except Exception as e: logger.error(f"Product identification failed: {e}", exc_info=True); return None
+
+def extract_product_info_from_text(text: str) -> Dict:
+    # ... (this function is unchanged)
+    if not text or not isinstance(text, str): return {'name': '', 'brand': '', 'weight': ''}
+    dairy_brands = ['SÜTAŞ', 'PINAR', 'İÇİM', 'TORKU', 'YÖRSAN', 'KEBİR', 'SEK', 'DANONE', 'ALTINKILIÇ', 'Eker']
+    beverage_brands = ['COCA-COLA', 'PEPSI', 'FRUKO', 'YEDİGÜN', 'ULUDAG', 'SİRMA', 'ERİKLİ', 'NESTLE PURE LIFE', 'BEYPAZARI', 'KIZILAY', 'LIPTON', 'DOĞUŞ ÇAY', 'ÇAYKUR']
+    snack_brands = ['ÜLKER', 'ETİ', 'ŞÖLEN', 'TADIM', 'KENT', 'LAY\'S', 'RUFFLES', 'DORITOS', 'CHEETOS', 'MİLFÖY']
+    pantry_brands = ['FİLİZ', 'NUHUN ANKARA', 'BARİLLA', 'KNORR', 'YUDUM', 'ORKİDE', 'TARİŞ', 'TUKAŞ', 'TAT', 'DARDANEL', 'SUPERFRESH']
+    cosmetic_brands = ['ARKO', 'DALAN', 'HACI ŞAKİR', 'DERBY', 'GILLETTE']
+    known_brands = sorted(dairy_brands + beverage_brands + snack_brands + pantry_brands + cosmetic_brands, key=len, reverse=True)
+    weight_regex = re.compile(r'(\d[\d.,]*\s*(?:kg|g|gr|ml|l|lt|litre|cl|cc|adet|x|’li)\b)', re.IGNORECASE)
+    text = text.replace('|', '\n').replace(' - ', '\n')
+    lines = [line.strip() for line in text.split('\n') if line.strip() and len(line) > 1]
+    found_brand = ''
+    found_weight = ''
+    potential_names = []
+    for line in lines:
+        if not found_brand:
+            for brand in known_brands:
+                if re.search(r'\b' + re.escape(brand) + r'\b', line, re.IGNORECASE):
+                    found_brand = brand.title()
+                    break
+        weight_match = weight_regex.search(line)
+        if weight_match and not found_weight:
+            found_weight = weight_match.group(1).lower()
+    for line in lines:
+        is_brand_line = found_brand and (found_brand.lower() in line.lower())
+        is_weight_line = weight_regex.fullmatch(line)
+        is_junk = re.fullmatch(r'[\d\s.,]+', line) or 'içindekiler' in line.lower() or 'ingredients' in line.lower()
+        if not is_brand_line and not is_weight_line and not is_junk:
+            potential_names.append(line)
+    product_name = ''
+    if potential_names:
+        product_name = max(potential_names, key=len)
+    elif lines:
+        product_name = max(lines, key=len)
+    if product_name and found_brand:
+        product_name = re.sub(r'\b' + re.escape(found_brand) + r'\b', '', product_name, flags=re.IGNORECASE).strip()
+    if product_name and found_weight:
+        product_name = re.sub(re.escape(found_weight), '', product_name, flags=re.IGNORECASE).strip()
+    if not found_brand and product_name:
+        first_word = product_name.split()[0]
+        for brand in known_brands:
+            if first_word.upper() == brand:
+                found_brand = brand.title()
+                product_name = ' '.join(product_name.split()[1:])
+                break
+    return { 'name': product_name.strip(), 'brand': found_brand.strip(), 'weight': found_weight.strip() }
+    
+def calculate_cosine_similarity(vec1, vec2) -> float:
+    # ... (this function is unchanged)
+    try:
+        if vec1 is None or vec2 is None: return 0.0
+        vec1 = np.asarray(vec1, dtype=np.float32)
+        vec2 = np.asarray(vec2, dtype=np.float32)
+        if vec1.shape != vec2.shape: return 0.0
+        norm1, norm2 = np.linalg.norm(vec1), np.linalg.norm(vec2)
+        if norm1 == 0 or norm2 == 0: return 0.0
+        dot_product = np.dot(vec1, vec2)
+        similarity = dot_product / (norm1 * norm2)
+        return float(np.nan_to_num(similarity))
+    except Exception:
+        return 0.0

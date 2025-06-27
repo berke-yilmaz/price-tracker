@@ -1,4 +1,4 @@
-// app/addprice.jsx - JavaScript versiyonu
+// app/addprice.jsx - CORRECTED
 import React, { useState, useEffect } from 'react';
 import {
   View,
@@ -12,89 +12,53 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
-import { useAuth } from '../contexts/AuthContext'; // AuthContext kullanarak token alacağız
-
-const API_URL = 'http://YOUR_BACKEND_URL/api'; // Backend URL'inizi buraya ekleyin
+import { useAuth } from '../contexts/AuthContext';
+import StoreSelector from '../components/StoreSelector';
+import theme from '../constants/theme';
+import config from '../config';
+import { Ionicons } from '@expo/vector-icons';
 
 export default function AddPriceScreen() {
   const router = useRouter();
-  const { barcode, productName: initialProductName } = useLocalSearchParams();
-  const { token } = useAuth(); // AuthContext'ten token alıyoruz
+  const { productId, barcode, productName: initialProductName } = useLocalSearchParams();
+  const { token } = useAuth();
   
   const [productName, setProductName] = useState(initialProductName || '');
-  const [selectedStore, setSelectedStore] = useState('');
+  const [selectedStore, setSelectedStore] = useState(null); // This will now hold the full store object
   const [price, setPrice] = useState('');
-  const [stores, setStores] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [loadingStores, setLoadingStores] = useState(true);
-
-  useEffect(() => {
-    fetchStores();
-  }, []);
-
-  const fetchStores = async () => {
-    try {
-      // AuthContext ile token aldığımız için AsyncStorage'dan almaya gerek yok
-      const response = await fetch(`${API_URL}/stores/`, {
-        headers: {
-          'Authorization': token ? `Token ${token}` : '',
-        },
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        setStores(data.results || data);
-      } else {
-        console.error('Mağazalar alınamadı');
-      }
-    } catch (error) {
-      console.error('Mağaza alım hatası:', error);
-      
-      // Fallback store listesi
-      setStores([
-        { id: '1', name: 'BİM' },
-        { id: '2', name: 'Migros' },
-        { id: '3', name: 'A101' },
-        { id: '4', name: 'Şok' },
-      ]);
-    } finally {
-      setLoadingStores(false);
-    }
-  };
 
   const handleSave = async () => {
-    if (!productName || !selectedStore || !price) {
-      Alert.alert('Hata', 'Lütfen tüm alanları doldurun');
+    // ⭐ FIX: We now check selectedStore, which is an object.
+    if (!selectedStore || !price) {
+      Alert.alert('Error', 'Please select a store and enter a price.');
       return;
     }
 
     const numericPrice = parseFloat(price.replace(',', '.'));
     if (isNaN(numericPrice) || numericPrice <= 0) {
-      Alert.alert('Hata', 'Lütfen geçerli bir fiyat girin');
+      Alert.alert('Error', 'Please enter a valid price.');
+      return;
+    }
+
+    if (!productId) {
+      Alert.alert('Error', 'Product information is missing. Please go back and select a product first.');
       return;
     }
 
     setLoading(true);
 
     try {
-      // Önce ürünü bul veya oluştur
-      let productId = await findOrCreateProduct(productName, barcode);
-      
-      if (!productId) {
-        throw new Error('Ürün oluşturulamadı');
-      }
-
-      // Fiyatı ekle
       const priceData = {
         product: productId,
-        store: selectedStore,
+        store: selectedStore.id, // Use the store ID from the selected object
         price: numericPrice.toFixed(2),
       };
 
-      const response = await fetch(`${API_URL}/prices/`, {
+      const response = await fetch(`${config.API_URL}/prices/`, {
         method: 'POST',
         headers: {
-          'Authorization': token ? `Token ${token}` : '',
+          'Authorization': `Token ${token}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(priceData),
@@ -102,150 +66,55 @@ export default function AddPriceScreen() {
 
       if (response.ok) {
         Alert.alert(
-          'Başarılı',
-          'Fiyat başarıyla eklendi!',
-          [
-            { text: 'Tamam', onPress: () => router.push('/(tabs)/history') }
-          ]
+          'Success',
+          'Price added successfully!',
+          [{ text: 'OK', onPress: () => router.push('/(tabs)/history') }]
         );
       } else {
         const errorData = await response.json();
-        console.error('API Hatası:', errorData);
+        console.error('API Error:', errorData);
         
-        // Kullanıcı için anlamlı hata mesajı
-        if (errorData.non_field_errors && errorData.non_field_errors.includes('unique_price_per_day')) {
-          Alert.alert('Bilgi', 'Bu ürün için bugün zaten fiyat eklemişsiniz.');
+        if (errorData.non_field_errors && errorData.non_field_errors[0].includes('unique_daily_price')) {
+          Alert.alert('Info', 'You have already added a price for this product at this store today.');
         } else {
-          Alert.alert('Hata', 'Fiyat eklenirken bir hata oluştu');
+          const errorMessage = errorData.detail || Object.values(errorData).flat().join('\n') || 'Failed to add price.';
+          Alert.alert('Error', errorMessage);
         }
       }
     } catch (error) {
-      console.error('Fiyat ekleme hatası:', error);
-      Alert.alert('Hata', 'Fiyat eklenirken bir hata oluştu');
+      console.error('Add price error:', error);
+      Alert.alert('Error', 'An unexpected error occurred while adding the price.');
     } finally {
       setLoading(false);
     }
   };
-
-  const findOrCreateProduct = async (name, barcode) => {
-    try {
-      // Önce mevcut ürünü ara
-      let searchUrl = `${API_URL}/products/search/?q=${encodeURIComponent(name)}`;
-      if (barcode) {
-        searchUrl = `${API_URL}/products/by_barcode/?barcode=${barcode}`;
-      }
-
-      const searchResponse = await fetch(searchUrl, {
-        headers: {
-          'Authorization': token ? `Token ${token}` : '',
-        },
-      });
-
-      if (searchResponse.ok) {
-        const data = await searchResponse.json();
-        const products = data.results || data;
-        
-        if (products.length > 0 || (data.found && data.product)) {
-          // API yanıt formatına bağlı olarak ürün ID'si alınır
-          return products.length > 0 ? products[0].id : data.product.id;
-        }
-      }
-
-      // Ürün bulunamadıysa yeni oluştur
-      const createResponse = await fetch(`${API_URL}/products/`, {
-        method: 'POST',
-        headers: {
-          'Authorization': token ? `Token ${token}` : '',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          name: name,
-          barcode: barcode || '',
-          brand: '',
-          category: '',
-        }),
-      });
-
-      if (createResponse.ok) {
-        const newProduct = await createResponse.json();
-        return newProduct.id;
-      }
-
-    } catch (error) {
-      console.error('Ürün arama/oluşturma hatası:', error);
-    }
-
-    return null;
-  };
-
-  if (loadingStores) {
-    return (
-      <SafeAreaView style={styles.container}>
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color="#007AFF" />
-          <Text style={styles.loadingText}>Mağazalar yükleniyor...</Text>
-        </View>
-      </SafeAreaView>
-    );
-  }
-
+  
   return (
     <SafeAreaView style={styles.container}>
       <ScrollView style={styles.scrollContainer}>
         <View style={styles.header}>
           <TouchableOpacity onPress={() => router.back()}>
-            <Text style={styles.backButton}>← Geri</Text>
+            <Ionicons name="arrow-back" size={24} color={theme.colors.text.primary} />
           </TouchableOpacity>
-          <Text style={styles.title}>Fiyat Ekle</Text>
-          <View style={{ width: 50 }} />
+          <Text style={styles.title}>Add Price</Text>
+          <View style={{ width: 24 }} />
         </View>
 
-        {barcode && (
-          <View style={styles.barcodeInfo}>
-            <Text style={styles.barcodeText}>Barkod: {barcode}</Text>
-          </View>
-        )}
-
         <View style={styles.form}>
-          <Text style={styles.label}>Ürün Adı</Text>
-          <TextInput
-            style={styles.input}
-            value={productName}
-            onChangeText={setProductName}
-            placeholder="Ürün adını girin"
-            editable={!initialProductName}
+          <View style={styles.productInfoCard}>
+             <Text style={styles.productInfoLabel}>Product</Text>
+             <Text style={styles.productInfoName}>{productName}</Text>
+             {barcode && <Text style={styles.productInfoBarcode}>Barcode: {barcode}</Text>}
+          </View>
+
+          <Text style={styles.label}>Store *</Text>
+          {/* ⭐ FIX: The component is now self-contained. We just pass the selectedStore object and the callback. */}
+          <StoreSelector
+            selectedStore={selectedStore}
+            onStoreSelect={setSelectedStore}
           />
 
-          <Text style={styles.label}>Mağaza</Text>
-          <ScrollView 
-            horizontal 
-            showsHorizontalScrollIndicator={false}
-            style={styles.storeScrollView}
-          >
-            <View style={styles.storeContainer}>
-              {stores.map(store => (
-                <TouchableOpacity
-                  key={store.id}
-                  style={[
-                    styles.storeButton,
-                    selectedStore === store.id && styles.selectedStore
-                  ]}
-                  onPress={() => setSelectedStore(store.id)}
-                >
-                  <Text
-                    style={[
-                      styles.storeText,
-                      selectedStore === store.id && styles.selectedStoreText
-                    ]}
-                  >
-                    {store.name}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-          </ScrollView>
-
-          <Text style={styles.label}>Fiyat</Text>
+          <Text style={styles.label}>Price *</Text>
           <View style={styles.priceInputContainer}>
             <TextInput
               style={styles.priceInput}
@@ -253,6 +122,7 @@ export default function AddPriceScreen() {
               onChangeText={setPrice}
               placeholder="0.00"
               keyboardType="decimal-pad"
+              placeholderTextColor={theme.colors.gray[400]}
             />
             <Text style={styles.currency}>₺</Text>
           </View>
@@ -263,9 +133,9 @@ export default function AddPriceScreen() {
             disabled={loading}
           >
             {loading ? (
-              <ActivityIndicator color="white" />
+              <ActivityIndicator color={theme.colors.text.inverse} />
             ) : (
-              <Text style={styles.saveButtonText}>Kaydet</Text>
+              <Text style={styles.saveButtonText}>Save Price</Text>
             )}
           </TouchableOpacity>
         </View>
@@ -274,10 +144,11 @@ export default function AddPriceScreen() {
   );
 }
 
+// Styles remain the same
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#f5f5f5',
+    backgroundColor: theme.colors.background,
   },
   scrollContainer: {
     flex: 1,
@@ -286,117 +157,84 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: 20,
+    padding: theme.spacing.lg,
+    backgroundColor: theme.colors.surface,
     borderBottomWidth: 1,
-    borderBottomColor: '#ddd',
-  },
-  backButton: {
-    color: '#007AFF',
-    fontSize: 16,
+    borderBottomColor: theme.colors.gray[200],
   },
   title: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#333',
-  },
-  barcodeInfo: {
-    backgroundColor: '#e8f5ff',
-    padding: 15,
-    margin: 20,
-    borderRadius: 8,
-  },
-  barcodeText: {
-    fontSize: 16,
-    color: '#007AFF',
-    textAlign: 'center',
+    fontSize: theme.typography.fontSize.lg,
+    fontWeight: theme.typography.fontWeight.bold,
+    color: theme.colors.text.primary,
   },
   form: {
-    padding: 20,
+    padding: theme.spacing.lg,
+  },
+  productInfoCard: {
+    backgroundColor: theme.colors.primary[50],
+    padding: theme.spacing.lg,
+    borderRadius: theme.borderRadius.lg,
+    marginBottom: theme.spacing.xl,
+    borderLeftWidth: 4,
+    borderLeftColor: theme.colors.primary[500],
+  },
+  productInfoLabel: {
+    fontSize: theme.typography.fontSize.sm,
+    color: theme.colors.text.secondary,
+    marginBottom: theme.spacing.xs,
+  },
+  productInfoName: {
+    fontSize: theme.typography.fontSize.xl,
+    fontWeight: theme.typography.fontWeight.bold,
+    color: theme.colors.text.primary,
+    marginBottom: theme.spacing.xs,
+  },
+  productInfoBarcode: {
+    fontSize: theme.typography.fontSize.sm,
+    color: theme.colors.text.secondary,
+    fontFamily: 'monospace',
   },
   label: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#333',
-    marginBottom: 8,
-    marginTop: 16,
-  },
-  input: {
-    backgroundColor: 'white',
-    paddingVertical: 12,
-    paddingHorizontal: 15,
-    borderRadius: 8,
-    fontSize: 16,
-    borderWidth: 1,
-    borderColor: '#ddd',
-  },
-  storeScrollView: {
-    marginVertical: 8,
-  },
-  storeContainer: {
-    flexDirection: 'row',
-  },
-  storeButton: {
-    backgroundColor: 'white',
-    paddingVertical: 10,
-    paddingHorizontal: 15,
-    borderRadius: 8,
-    margin: 4,
-    borderWidth: 1,
-    borderColor: '#ddd',
-  },
-  selectedStore: {
-    backgroundColor: '#007AFF',
-    borderColor: '#007AFF',
-  },
-  storeText: {
-    fontSize: 14,
-    color: '#333',
-  },
-  selectedStoreText: {
-    color: 'white',
+    fontSize: theme.typography.fontSize.base,
+    fontWeight: theme.typography.fontWeight.semibold,
+    color: theme.colors.text.primary,
+    marginBottom: theme.spacing.sm,
+    marginTop: theme.spacing.md,
   },
   priceInputContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'white',
-    borderRadius: 8,
+    backgroundColor: theme.colors.surface,
+    borderRadius: theme.borderRadius.lg,
     borderWidth: 1,
-    borderColor: '#ddd',
+    borderColor: theme.colors.gray[300],
   },
   priceInput: {
     flex: 1,
-    paddingVertical: 12,
-    paddingHorizontal: 15,
-    fontSize: 16,
+    paddingVertical: theme.spacing.md,
+    paddingHorizontal: theme.spacing.md,
+    fontSize: theme.typography.fontSize.lg,
+    color: theme.colors.text.primary,
   },
   currency: {
-    fontSize: 16,
-    color: '#666',
-    paddingRight: 15,
+    fontSize: theme.typography.fontSize.lg,
+    color: theme.colors.text.secondary,
+    paddingRight: theme.spacing.md,
+    fontWeight: theme.typography.fontWeight.medium,
   },
   saveButton: {
-    backgroundColor: '#4CAF50',
-    paddingVertical: 15,
-    borderRadius: 10,
-    marginTop: 30,
-  },
-  disabledButton: {
-    opacity: 0.5,
-  },
-  saveButtonText: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: '600',
-    textAlign: 'center',
-  },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: 'center',
+    backgroundColor: theme.colors.success[500],
+    paddingVertical: theme.spacing.lg,
+    borderRadius: theme.borderRadius.xl,
+    marginTop: theme.spacing.xl,
     alignItems: 'center',
   },
-  loadingText: {
-    marginTop: 10,
-    color: '#666',
-    fontSize: 16,
+  disabledButton: {
+    opacity: 0.6,
+  },
+  saveButtonText: {
+    color: theme.colors.text.inverse,
+    fontSize: theme.typography.fontSize.lg,
+    fontWeight: theme.typography.fontWeight.bold,
   },
 });

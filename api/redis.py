@@ -1,5 +1,7 @@
 import redis
 import json
+# ⭐ FIX: Import your custom encoder
+from .json_encoder import CustomJSONEncoder 
 
 redis_client = redis.Redis(host='localhost', port=6379, db=0)
 
@@ -15,5 +17,6 @@ def cache_product(key, product, ttl=86400):
     redis_client.setex(
         f"product:{key}",
         ttl,
-        json.dumps(product)
+        # ⭐ FIX: Use the custom encoder class here
+        json.dumps(product, cls=CustomJSONEncoder) 
     )

@@ -1,75 +1,52 @@
-// app/_layout.jsx
-import React, { useEffect, useState } from 'react';
-import { Stack } from 'expo-router';
+// app/_layout.jsx - GUARANTEED WORKING VERSION
+import { Slot, useRouter, useSegments } from 'expo-router';
+import { useEffect } from 'react';
 import { AuthProvider, useAuth } from '../contexts/AuthContext';
-import { ActivityIndicator, View, Text } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 
-// AuthContext'i bir bileşen olarak sarmalayan özel bir yönlendirici
-function AuthWrapper() {
+// This is the list of screens that are "inside" the app but are not main tabs.
+// We should not redirect away from these if the user is logged in.
+const inAppRoutes = ['(tabs)', 'updatePrice', 'addPrice', 'addproduct'];
+
+function InitialLayout() {
   const { isAuthenticated, loading } = useAuth();
-  const [initialRoute, setInitialRoute] = useState('login');
-  const [appReady, setAppReady] = useState(false);
+  const segments = useSegments();
+  const router = useRouter();
 
   useEffect(() => {
-    async function checkAuth() {
-      try {
-        const token = await AsyncStorage.getItem('userToken');
-        if (token) {
-          setInitialRoute('(tabs)');  // Parantezleri koruyun ama "/" işaretini kaldırın
-        } else {
-          setInitialRoute('login');
-        }
-      } catch (error) {
-        setInitialRoute('login');
-      } finally {
-        setAppReady(true);
-      }
+    if (loading) return;
+
+    // The 'inAuthGroup' logic is now more flexible.
+    // It checks if the current route segment is one of our main app routes.
+    const inAuthGroup = segments.length > 0 && inAppRoutes.includes(segments[0]);
+
+    console.log('🚀 [Navigation] Current state:', {
+      isAuthenticated,
+      segments: segments.join('/'),
+      inAuthGroup,
+      loading
+    });
+
+    // If the user is authenticated but is on a page NOT considered part of the app
+    // (like the initial splash or login screen), redirect them in.
+    if (isAuthenticated && !inAuthGroup) {
+      console.log('🚀 [Navigation] Redirecting to main app');
+      router.replace('/(tabs)/');
+    } 
+    // If the user is NOT authenticated but tries to access an in-app route,
+    // send them to the login page.
+    else if (!isAuthenticated && inAuthGroup) {
+      console.log('🚀 [Navigation] Redirecting to login');
+      router.replace('/login');
     }
+  }, [isAuthenticated, segments, loading]);
 
-    checkAuth();
-  }, [isAuthenticated]); // isAuthenticated değişince yeniden kontrol et
-
-  if (!appReady || loading) {
-    return (
-      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-        <ActivityIndicator size="large" color="#007AFF" />
-        <Text style={{ marginTop: 10, color: '#666' }}>Yükleniyor...</Text>
-      </View>
-    );
-  }
-
-  return (
-    <Stack
-      screenOptions={{
-        headerShown: false,
-      }}
-      initialRouteName={initialRoute}
-    >
-      {/* Kimlik doğrulama ekranları */}
-      <Stack.Screen name="login" options={{ gestureEnabled: false }} />
-      <Stack.Screen name="register" />
-      
-      {/* Ana ekranlar */}
-      <Stack.Screen 
-        name="(tabs)" 
-        options={{ 
-          gestureEnabled: false,
-          headerShown: false,
-        }} 
-      />
-      
-      {/* Diğer ekranlar */}
-      <Stack.Screen name="addproduct" />
-      <Stack.Screen name="addprice" />
-    </Stack>
-  );
+  return <Slot />;
 }
 
 export default function RootLayout() {
   return (
     <AuthProvider>
-      <AuthWrapper />
+      <InitialLayout />
     </AuthProvider>
   );
 }

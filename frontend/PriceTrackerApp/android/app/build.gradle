@@ -87,13 +87,13 @@ android {
     buildToolsVersion rootProject.ext.buildToolsVersion
     compileSdk rootProject.ext.compileSdkVersion
 
-    namespace 'com.anonymous.PriceTrackerApp'
+    namespace 'com.pricetracker.mobile'
     defaultConfig {
-        applicationId 'com.anonymous.PriceTrackerApp'
+        applicationId 'com.pricetracker.mobile'
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1
-        versionName "1.0.0"
+        versionName "2.0.0"
     }
     signingConfigs {
         debug {

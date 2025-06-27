@@ -1,433 +1,228 @@
-// app/(tabs)/scan.jsx
-import React, { useState, useRef, useEffect } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
-  SafeAreaView,
-  Alert,
-  ActivityIndicator,
-  Image,
-  ScrollView,
-} from 'react-native';
+// app/(tabs)/scan.jsx - FIXED
+import React, { useState, useEffect, useRef } from 'react';
+import { View, Text, StyleSheet, Alert, ActivityIndicator, SafeAreaView } from 'react-native';
+// ⭐ --- START OF FIX --- ⭐
+// Import useIsFocused from @react-navigation/native, NOT from expo-router
+import { useIsFocused } from '@react-navigation/native'; 
 import { useRouter } from 'expo-router';
-import { Camera, CameraType } from 'expo-camera';
-import * as ImagePicker from 'expo-image-picker';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+// ⭐ --- END OF FIX --- ⭐
 import { useAuth } from '../../contexts/AuthContext';
 import config from '../../config';
+import EnhancedScanner from '../../components/scanner/EnhancedScanner';
+import SimilarityResultsModal from '../../components/SimilarityResultsModal';
+import BarcodeDisambiguationModal from '../../components/scanner/BarcodeDisambiguationModal';
 
-const ScanScreen = () => {
+export default function ScanScreen() {
   const router = useRouter();
   const { token } = useAuth();
-  const [type, setType] = useState(CameraType.back);
-  const [hasPermission, setHasPermission] = useState(null);
-  const [processing, setProcessing] = useState(false);
-  const [cameraReady, setCameraReady] = useState(false);
-  const [capturedImage, setCapturedImage] = useState(null);
-  const [recognizedProducts, setRecognizedProducts] = useState([]);
+  const isFocused = useIsFocused();
+  const pollIntervalRef = useRef(null);
+
+  const [statusText, setStatusText] = useState('');
+  const [modalType, setModalType] = useState(null);
   
-  const cameraRef = useRef(null);
+  const [similarityData, setSimilarityData] = useState({ candidates: [], imageUri: null, analysis: null });
+  const [barcodeData, setBarcodeData] = useState({ products: [], barcode: null });
 
+  // Cleanup polling when the screen is left
   useEffect(() => {
-    const getCameraPermissions = async () => {
-      const { status } = await Camera.requestCameraPermissionsAsync();
-      setHasPermission(status === 'granted');
+    return () => {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+      }
     };
-
-    getCameraPermissions();
   }, []);
 
-  const takePicture = async () => {
-    if (cameraRef.current && cameraReady) {
-      setProcessing(true);
+  const resetState = () => {
+    setStatusText('');
+    setModalType(null);
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    if (!isFocused) {
+      resetState();
+    }
+  }, [isFocused]);
+
+  const pollForResult = (jobId) => {
+    pollIntervalRef.current = setInterval(async () => {
       try {
-        const photo = await cameraRef.current.takePictureAsync({
-          quality: 0.8,
-          base64: false,
-          skipProcessing: false,
+        const response = await fetch(`${config.API_URL}/products/visual-search-result/?job_id=${jobId}`, {
+          headers: { 'Authorization': `Token ${token}` },
         });
 
-        setCapturedImage(photo.uri);
-        
-        // Backend'e fotoğrafı gönder ve ürünü tanı
-        const result = await identifyProduct(photo);
-        
-        if (result.found && result.product) {
-          setRecognizedProducts([result.product]);
-          showProductFound(result.product);
-        } else {
-          showProductNotFound();
+        if (!response.ok) {
+            throw new Error("Failed to get job status.");
+        }
+
+        const result = await response.json();
+        setStatusText(`Status: ${result.status}...`);
+
+        if (result.status === 'SUCCESS') {
+          clearInterval(pollIntervalRef.current);
+          setStatusText('Search complete!');
+          const finalResult = result.results;
+          setSimilarityData({
+              candidates: finalResult.candidates,
+              imageUri: similarityData.imageUri,
+              analysis: finalResult.image_analysis,
+          });
+          setModalType('similarity');
+        } else if (result.status === 'FAILURE') {
+          clearInterval(pollIntervalRef.current);
+          Alert.alert('Error', result.error || 'Visual search failed during processing.');
+          resetState();
         }
       } catch (error) {
-        console.error('Fotoğraf çekme hatası:', error);
-        Alert.alert('Hata', 'Fotoğraf çekilirken bir hata oluştu');
-      } finally {
-        setProcessing(false);
+        clearInterval(pollIntervalRef.current);
+        Alert.alert('Connection Error', 'Could not poll for results.');
+        resetState();
       }
-    }
+    }, 2500);
   };
 
-  const pickImage = async () => {
-    try {
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
-        allowsEditing: true,
-        aspect: [4, 3],
-        quality: 0.8,
-      });
-
-      if (!result.canceled && result.assets[0]) {
-        const asset = result.assets[0];
-        setCapturedImage(asset.uri);
-        setProcessing(true);
-        
-        const identifyResult = await identifyProduct(asset);
-        
-        if (identifyResult.found && identifyResult.product) {
-          setRecognizedProducts([identifyResult.product]);
-          showProductFound(identifyResult.product);
-        } else {
-          showProductNotFound();
-        }
-        setProcessing(false);
-      }
-    } catch (error) {
-      console.error('Galeri açma hatası:', error);
-      Alert.alert('Hata', 'Galeri açılırken bir hata oluştu');
-    }
-  };
-
-  const identifyProduct = async (photo) => {
+  const handlePhotoAction = async (photo) => {
+    if (!photo?.uri) return;
+    setStatusText('Uploading image...');
+    setSimilarityData({ candidates: [], imageUri: photo.uri, analysis: null });
+    
     try {
       const formData = new FormData();
-      formData.append('image', {
-        uri: photo.uri,
-        type: 'image/jpeg',
-        name: 'product.jpg',
-      });
+      formData.append('image', { uri: photo.uri, type: 'image/jpeg', name: 'scan.jpg' });
 
-      const response = await fetch(`${config.API_URL}/products/identify/`, {
+      const response = await fetch(`${config.API_URL}/products/start-visual-search/`, {
         method: 'POST',
-        headers: {
-          'Authorization': token ? `Token ${token}` : '',
-          'Content-Type': 'multipart/form-data',
-        },
+        headers: { 'Authorization': `Token ${token}` },
         body: formData,
       });
 
-      if (!response.ok) {
-        throw new Error('Ürün tanıma hatası');
+      const result = await response.json();
+      if (!response.ok || !result.success) {
+        throw new Error(result.error || 'Failed to start search job.');
       }
+      
+      setStatusText('Analyzing image in background...');
+      pollForResult(result.job_id);
 
-      return await response.json();
     } catch (error) {
-      console.error('Ürün tanıma hatası:', error);
-      return { found: false };
+      Alert.alert('Error', `Could not start visual search: ${error.message}`);
+      resetState();
+    }
+  };
+  
+  const handleBarcodeScanned = async ({ data: barcode }) => {
+    if (statusText) return;
+    setStatusText('Checking barcode...');
+    try {
+      const response = await fetch(`${config.API_URL}/products/?barcode=${barcode}`);
+      const result = await response.json();
+      const products = result.results || [];
+      if (products.length === 0) {
+        router.push({ pathname: '/addproduct', params: { barcode } });
+      } else if (products.length === 1) {
+        const product = products[0];
+        router.push({ pathname: '/addprice', params: { productId: product.id, productName: product.name, barcode: product.barcode } });
+      } else {
+        setBarcodeData({ products, barcode });
+        setModalType('barcode');
+      }
+    } catch (error) {
+      Alert.alert('Error', 'Could not process barcode.');
+    } finally {
+      setTimeout(() => setStatusText(''), 2000); 
     }
   };
 
-  const showProductFound = (product) => {
-    Alert.alert(
-      'Ürün Bulundu!',
-      `${product.name}\n${product.brand || ''}\n${product.lowest_price ? `Son fiyat: ₺${product.lowest_price.price} (${product.lowest_price.store})` : ''}`,
-      [
-        { text: 'Yeniden Dene', onPress: () => setCapturedImage(null) },
-        { 
-          text: 'Fiyat Ekle', 
-          onPress: () => router.push(`/addprice?barcode=${product.barcode}&productId=${product.id}&productName=${encodeURIComponent(product.name)}`) 
-        },
-      ]
-    );
+  const handleSimilaritySelect = (product) => { 
+    resetState(); 
+    router.push({ 
+        pathname: '/addprice', 
+        params: { 
+            productId: product.id, 
+            productName: product.name, 
+            barcode: product.barcode 
+        } 
+    }); 
+  };
+  
+  const handleSimilarityNotFound = () => {
+    const analysisString = JSON.stringify(similarityData.analysis);
+
+    resetState();
+    
+    router.push({
+      pathname: '/addproduct',
+      params: { 
+        imageUri: similarityData.imageUri,
+        analysisResult: analysisString, 
+      }
+    });
   };
 
-  const showProductNotFound = () => {
-    Alert.alert(
-      'Ürün Bulunamadı',
-      'Bu ürün veritabanımızda bulunamadı. Yeni ürün olarak eklemek ister misiniz?',
-      [
-        { text: 'Yeniden Dene', onPress: () => setCapturedImage(null) },
-        { text: 'Yeni Ürün Ekle', onPress: () => router.push('/addproduct') },
-      ]
-    );
-  };
-
-  if (hasPermission === null) {
-    return (
-      <View style={styles.container}>
-        <ActivityIndicator size="large" color="#007AFF" />
-        <Text style={styles.loadingText}>Kamera izni isteniyor...</Text>
-      </View>
-    );
-  }
-
-  if (hasPermission === false) {
-    return (
-      <View style={styles.container}>
-        <Text style={styles.errorText}>Kamera erişimi reddedildi</Text>
-        <TouchableOpacity 
-          style={styles.button}
-          onPress={() => Camera.requestCameraPermissionsAsync()}
-        >
-          <Text style={styles.buttonText}>İzin Ver</Text>
-        </TouchableOpacity>
-      </View>
-    );
-  }
-
-  if (capturedImage && !processing) {
-    return (
-      <SafeAreaView style={styles.container}>
-        <View style={styles.header}>
-          <TouchableOpacity onPress={() => setCapturedImage(null)}>
-            <Text style={styles.backButton}>← Geri</Text>
-          </TouchableOpacity>
-          <Text style={styles.title}>Sonuç</Text>
-        </View>
-        
-        <ScrollView style={styles.previewContainer}>
-          <Image source={{ uri: capturedImage }} style={styles.previewImage} />
-          
-          {recognizedProducts.length > 0 && (
-            <View style={styles.productList}>
-              {recognizedProducts.map((product, index) => (
-                <View key={index} style={styles.productCard}>
-                  <Text style={styles.productName}>{product.name}</Text>
-                  <Text style={styles.productBrand}>{product.brand}</Text>
-                  {product.lowest_price && (
-                    <Text style={styles.productPrice}>
-                      Son fiyat: ₺{product.lowest_price.price} ({product.lowest_price.store})
-                    </Text>
-                  )}
-                  <TouchableOpacity 
-                    style={styles.addPriceButton}
-                    onPress={() => router.push(`/addprice?barcode=${product.barcode}&productId=${product.id}&productName=${encodeURIComponent(product.name)}`)}
-                  >
-                    <Text style={styles.addPriceButtonText}>Fiyat Ekle</Text>
-                  </TouchableOpacity>
-                </View>
-              ))}
-            </View>
-          )}
-        </ScrollView>
-      </SafeAreaView>
-    );
-  }
+  const handleBarcodeSelect = (product) => { resetState(); router.push({ pathname: '/addprice', params: { productId: product.id, productName: product.name, barcode: product.barcode } }); };
+  const handleBarcodeNotFound = () => { resetState(); router.push({ pathname: '/addproduct', params: { barcode: barcodeData.barcode } }); };
+  
+  if (!isFocused) return <SafeAreaView style={styles.container} />;
 
   return (
     <SafeAreaView style={styles.container}>
-      <View style={styles.cameraContainer}>
-        <Camera
-          ref={cameraRef}
-          style={styles.camera}
-          type={type}
-          onCameraReady={() => setCameraReady(true)}
-        >
-          <View style={styles.cameraOverlay}>
-            <Text style={styles.cameraInfo}>
-              Ürün fotoğrafı çekmek için butona basın
-            </Text>
-          </View>
-        </Camera>
-      </View>
-
-      <View style={styles.controls}>
-        <View style={styles.actionButtons}>
-          <TouchableOpacity 
-            style={styles.galleryButton}
-            onPress={pickImage}
-          >
-            <Text style={styles.galleryButtonText}>Galeri</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity 
-            style={[styles.captureButton, processing && styles.disabledButton]}
-            onPress={takePicture}
-            disabled={processing}
-          >
-            {processing ? (
-              <ActivityIndicator color="white" />
-            ) : (
-              <View style={styles.captureButtonInner} />
-            )}
-          </TouchableOpacity>
-
-          <TouchableOpacity 
-            style={styles.flipButton}
-            onPress={() => setType(current => current === CameraType.back ? CameraType.front : CameraType.back)}
-          >
-            <Text style={styles.flipButtonText}>🔄</Text>
-          </TouchableOpacity>
+      <EnhancedScanner
+        onBarcodeScanned={handleBarcodeScanned}
+        onPhotoTaken={handlePhotoAction}
+        onGalleryPhoto={handlePhotoAction}
+        mode="both"
+      />
+      
+      {!!statusText && (
+        <View style={styles.processingOverlay}>
+          <ActivityIndicator size="large" color="#FFF" />
+          <Text style={styles.processingText}>{statusText}</Text>
         </View>
-      </View>
+      )}
+
+      <SimilarityResultsModal
+        visible={modalType === 'similarity'}
+        onClose={resetState}
+        candidates={similarityData.candidates}
+        originalImageUri={similarityData.imageUri}
+        onSelectProduct={handleSimilaritySelect}
+        onProductNotFound={handleSimilarityNotFound}
+      />
+
+      <BarcodeDisambiguationModal
+        visible={modalType === 'barcode'}
+        onClose={resetState}
+        products={barcodeData.products}
+        barcode={barcodeData.barcode}
+        onSelectProduct={handleBarcodeSelect}
+        onCreateNew={handleBarcodeNotFound}
+      />
     </SafeAreaView>
   );
-};
+}
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#000',
+    backgroundColor: 'black',
   },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    padding: 20,
-    backgroundColor: '#000',
-  },
-  backButton: {
-    color: '#fff',
-    fontSize: 16,
-  },
-  title: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: 'bold',
-  },
-  cameraContainer: {
-    flex: 1,
-    overflow: 'hidden',
-  },
-  camera: {
-    flex: 1,
-  },
-  cameraOverlay: {
-    flex: 1,
+  processingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
     justifyContent: 'center',
     alignItems: 'center',
+    zIndex: 10,
   },
-  cameraInfo: {
-    color: '#fff',
-    fontSize: 16,
-    textAlign: 'center',
-    margin: 20,
-  },
-  controls: {
-    paddingBottom: 30,
-    paddingTop: 20,
-    backgroundColor: '#000',
-  },
-  actionButtons: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    alignItems: 'center',
-  },
-  galleryButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
-    paddingVertical: 8,
-    paddingHorizontal: 15,
-    borderRadius: 20,
-  },
-  galleryButtonText: {
+  processingText: {
     color: 'white',
-    fontSize: 14,
-  },
-  captureButton: {
-    width: 70,
-    height: 70,
-    borderRadius: 35,
-    backgroundColor: 'rgba(255, 255, 255, 0.3)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  disabledButton: {
-    opacity: 0.5,
-  },
-  captureButtonInner: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    backgroundColor: '#fff',
-  },
-  flipButton: {
-    width: 50,
-    height: 50,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  flipButtonText: {
-    fontSize: 24,
-    color: 'white',
-  },
-  button: {
-    backgroundColor: '#007AFF',
-    paddingVertical: 15,
-    paddingHorizontal: 30,
-    borderRadius: 10,
     marginTop: 20,
-  },
-  buttonText: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  previewContainer: {
-    flex: 1,
-    backgroundColor: '#f5f5f5',
-  },
-  previewImage: {
-    width: '100%',
-    height: 300,
-    resizeMode: 'contain',
-  },
-  productList: {
-    padding: 20,
-  },
-  productCard: {
-    backgroundColor: '#fff',
-    padding: 15,
-    borderRadius: 10,
-    marginBottom: 15,
-    shadowColor: '#000',
-    shadowOffset: {
-      width: 0,
-      height: 2,
-    },
-    shadowOpacity: 0.1,
-    shadowRadius: 3.84,
-    elevation: 5,
-  },
-  productName: {
     fontSize: 18,
-    fontWeight: 'bold',
-    color: '#333',
-  },
-  productBrand: {
-    fontSize: 14,
-    color: '#666',
-    marginTop: 5,
-  },
-  productPrice: {
-    fontSize: 14,
-    color: '#4CAF50',
-    marginTop: 5,
-  },
-  addPriceButton: {
-    backgroundColor: '#007AFF',
-    paddingVertical: 8,
-    paddingHorizontal: 15,
-    borderRadius: 8,
-    marginTop: 10,
-    alignSelf: 'flex-start',
-  },
-  addPriceButtonText: {
-    color: '#fff',
-    fontSize: 14,
     fontWeight: '600',
-  },
-  loadingText: {
-    color: 'white',
-    fontSize: 16,
-    marginTop: 10,
-  },
-  errorText: {
-    color: 'white',
-    fontSize: 16,
+    paddingHorizontal: 20,
     textAlign: 'center',
-    marginBottom: 20,
   },
 });
-
-export default ScanScreen;

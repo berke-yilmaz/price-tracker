@@ -1,4 +1,4 @@
-# api/serializers.py - Enhanced with Color Support
+# api/serializers.py - FINAL VERSION with ProductCreationSerializer and fixed imports
 from django.contrib.auth.models import User
 from rest_framework import serializers
 from .util import (
@@ -8,6 +8,15 @@ from .util import (
 )
 from .models import Product, Store, Price, ProcessingJob
 from django.contrib.auth import authenticate
+from django.utils import timezone
+import random
+import time
+
+# Fix PIL import warnings
+try:
+    from PIL import Image as PILImage
+except ImportError:
+    import PIL.Image as PILImage
 
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
@@ -64,114 +73,89 @@ class ChangePasswordSerializer(serializers.Serializer):
             
         return data
 
-# Enhanced Product Serializers with Color Support
-
-class ProductColorInfoSerializer(serializers.Serializer):
-    """Serializer for color information"""
-    category = serializers.CharField()
-    confidence = serializers.FloatField()
-    dominant_colors = serializers.ListField(
-        child=serializers.ListField(child=serializers.IntegerField())
-    )
-    color_display = serializers.CharField()
+# Enhanced Product Serializers with Image Display
 
 class ProductSerializer(serializers.ModelSerializer):
-    """Enhanced Product serializer with color information"""
-    lowest_price = serializers.SerializerMethodField(read_only=True)
-    color_info = serializers.SerializerMethodField(read_only=True)
-    color_display = serializers.CharField(source='get_color_display', read_only=True)
-    is_processed = serializers.BooleanField(read_only=True)
-    has_visual_features = serializers.BooleanField(read_only=True)
-    has_color_analysis = serializers.BooleanField(read_only=True)
-    
+    """
+    This serializer now correctly handles price display by prioritizing
+    the efficient 'lowest_price_val' annotation from the view.
+    """
+    # ⭐ --- START OF FIX --- ⭐
+    lowest_price = serializers.SerializerMethodField()
+    image_display_url = serializers.CharField(source='get_image_url', read_only=True)
+
     class Meta:
         model = Product
         fields = [
             'id', 'name', 'barcode', 'brand', 'category', 
-            'image_url', 'image_front_url', 'weight', 'ingredients',
-            'color_category', 'color_confidence', 'color_display', 'dominant_colors',
+            'image', 'image_url', 'image_front_url', 'image_display_url',
+            'weight', 'ingredients',
+            'color_category', 'color_confidence', 'dominant_colors',
             'processing_status', 'created_at', 'updated_at', 'processed_at',
-            'lowest_price', 'color_info', 'is_processed', 
-            'has_visual_features', 'has_color_analysis'
+            'lowest_price' # We only need this one field now
         ]
         read_only_fields = [
-            'created_at', 'updated_at', 'processed_at', 'processing_status',
+            'id', 'created_at', 'updated_at', 'processed_at', 'processing_status',
             'color_category', 'color_confidence', 'dominant_colors'
         ]
     
     def get_lowest_price(self, obj):
-        """Return the lowest price"""
-        price = Price.objects.filter(product=obj).order_by('price').first()
-        if price:
-            return {
-                'price': price.price,
-                'store': price.store.name,
-                'date': price.created_at
-            }
+        """
+        This method is now robust. It checks for the pre-calculated 'lowest_price_val'
+        from the optimized queryset first. This makes the Search screen fast.
+        If that's not present, it falls back to a direct query.
+        """
+        if hasattr(obj, 'lowest_price_val') and obj.lowest_price_val is not None:
+            # The view provided the price, so we just return it.
+            return {'price': obj.lowest_price_val}
+        
+        # Fallback for other contexts (like the History screen's nested product)
+        price_instance = Price.objects.filter(product=obj).order_by('price').first()
+        if price_instance:
+            return {'price': price_instance.price, 'store': price_instance.store.name}
+        
         return None
-    
-    def get_color_info(self, obj):
-        """Return detailed color information"""
-        if obj.has_color_analysis:
-            return {
-                'category': obj.color_category,
-                'confidence': obj.color_confidence,
-                'display_name': obj.get_color_display(),
-                'dominant_colors': obj.dominant_colors or [],
-                'has_analysis': True
-            }
-        return {
-            'category': 'unknown',
-            'confidence': 0.0,
-            'display_name': 'Belirsiz',
-            'dominant_colors': [],
-            'has_analysis': False
-        }
-
+    # ⭐ --- END OF FIX --- ⭐
 class ProductCreationSerializer(serializers.ModelSerializer):
-    """Enhanced serializer for creating new products with automatic processing"""
+    """
+    Serializer for creating products. This version is now correct.
+    """
     image = serializers.ImageField(required=False, write_only=True)
-    auto_process = serializers.BooleanField(default=True, write_only=True)
-    
+
     class Meta:
         model = Product
         fields = [
-            'name', 'barcode', 'brand', 'category', 
-            'weight', 'ingredients', 'image', 'auto_process'
+            'id', 'name', 'barcode', 'brand', 'category', 
+            'weight', 'ingredients', 'image'
         ]
+        read_only_fields = ['id']
     
     def create(self, validated_data):
+        from .tasks import process_product_image
+
         image = validated_data.pop('image', None)
-        auto_process = validated_data.pop('auto_process', True)
+        validated_data['processing_status'] = 'pending'
         
-        # Create product
+        if not validated_data.get('barcode'):
+            validated_data['barcode'] = f"AI-{int(time.time())}{random.randint(100, 999)}"
+        
         product = Product.objects.create(**validated_data)
         
-        # Process image if provided
-        if image and auto_process:
-            self._process_product_image(product, image)
-        
-        # Generate text embedding
-        if auto_process:
-            try:
-                # Use color-aware text embedding if color is known
-                color_category = getattr(product, 'color_category', 'unknown')
-                text_embedding = get_color_aware_text_embedding(product.name, color_category)
-                product.color_aware_text_embedding = text_embedding.tolist()
-                product.save()
-            except Exception as e:
-                print(f"Error generating text embedding: {e}")
-        
+        if image:
+            product.image.save(f"product_{product.id}.jpg", image, save=True)
+            process_product_image.delay(product.id)
+            
         return product
+
     
     def _process_product_image(self, product, image):
         """Process uploaded image for color and visual features"""
         try:
-            from PIL import Image as PILImage
             import io
             
-            # Convert to PIL Image
+            # Convert to PIL Image with proper handling
             if hasattr(image, 'read'):
+                image.seek(0)  # Reset file pointer
                 img_data = image.read()
                 pil_image = PILImage.open(io.BytesIO(img_data)).convert('RGB')
             else:
@@ -182,14 +166,13 @@ class ProductCreationSerializer(serializers.ModelSerializer):
             product.color_category = color_info['category']
             product.color_confidence = float(color_info['confidence'])
 
-            if color_info['colors']:
+            if color_info.get('colors'):
                 product.dominant_colors = color_info['colors']
             
             # Visual features extraction with ResNet
             try:
                 visual_features = extract_visual_features_resnet(
                     pil_image, 
-                    remove_bg=True,
                     color_category=color_info['category']
                 )
                 product.visual_embedding = visual_features.tolist()
@@ -214,8 +197,27 @@ class ProductBarcodeSerializer(serializers.Serializer):
     brand = serializers.CharField(max_length=100, required=False, allow_blank=True)
     category = serializers.CharField(max_length=100, required=False, allow_blank=True)
     weight = serializers.CharField(max_length=50, required=False, allow_blank=True)
+    ingredients = serializers.CharField(required=False, allow_blank=True)
     image = serializers.ImageField(required=False)
     auto_process = serializers.BooleanField(default=True)
+    
+    def create(self, validated_data):
+        """Create product from barcode data"""
+        image = validated_data.pop('image', None)
+        auto_process = validated_data.pop('auto_process', True)
+        
+        # Use ProductCreationSerializer for actual creation
+        serializer = ProductCreationSerializer(data=validated_data)
+        if serializer.is_valid():
+            product = serializer.save()
+            
+            # Handle image separately if provided
+            if image and auto_process:
+                serializer._process_product_image(product, image)
+            
+            return product
+        else:
+            raise serializers.ValidationError(serializer.errors)
 
 class ProductIdentificationSerializer(serializers.Serializer):
     """Enhanced serializer for product identification with color hints"""
@@ -248,31 +250,139 @@ class ProductSearchSerializer(serializers.Serializer):
     has_visual_features = serializers.BooleanField(required=False)
     limit = serializers.IntegerField(required=False, min_value=1, max_value=100, default=20)
 
+# api/serializers.py - Enhanced Store serializer
 class StoreSerializer(serializers.ModelSerializer):
     product_count = serializers.SerializerMethodField(read_only=True)
+    distance = serializers.SerializerMethodField(read_only=True)
+    distance_text = serializers.SerializerMethodField(read_only=True)
     
     class Meta:
         model = Store
-        fields = ['id', 'name', 'latitude', 'longitude', 'address', 'product_count']
+        fields = [
+            'id', 'name', 'latitude', 'longitude', 'address',
+            'formatted_address', 'city', 'country', 'postal_code',
+            'phone', 'website', 'opening_hours',
+            'product_count', 'distance', 'distance_text',
+            'created_at'
+        ]
     
     def get_product_count(self, obj):
-        """Return number of products with prices in this store"""
         return Price.objects.filter(store=obj).values('product').distinct().count()
+    
+    def get_distance(self, obj):
+        request = self.context.get('request')
+        if request and hasattr(request, 'user_location') and obj.has_location:
+            user_lat = request.user_location.get('latitude')
+            user_lng = request.user_location.get('longitude')
+            if user_lat and user_lng:
+                return obj.calculate_distance(user_lat, user_lng)
+        return None
+    
+    def get_distance_text(self, obj):
+        distance = self.get_distance(obj)
+        if distance is not None:
+            if distance < 1:
+                return f"{int(distance * 1000)}m"
+            else:
+                return f"{distance:.1f}km"
+        return None
+
+class StoreCreationSerializer(serializers.ModelSerializer):
+    """Serializer for creating new stores with location support"""
+    
+    class Meta:
+        model = Store
+        fields = ['id', 'name', 'address', 'latitude', 'longitude']
+        read_only_fields = ['id']
+    
+    def validate_name(self, value):
+        """Ensure store name is not empty"""
+        if not value.strip():
+            raise serializers.ValidationError("Store name cannot be empty")
+        return value.strip()
+    
+    def create(self, validated_data):
+        """Create store with validation"""
+        # Check for duplicate stores at the same location
+        if validated_data.get('latitude') and validated_data.get('longitude'):
+            existing_store = Store.objects.filter(
+                name=validated_data['name'],
+                latitude=validated_data['latitude'],
+                longitude=validated_data['longitude']
+            ).first()
+            
+            if existing_store:
+                raise serializers.ValidationError("A store with this name already exists at this location")
+        
+        return Store.objects.create(**validated_data)
 
 class PriceSerializer(serializers.ModelSerializer):
     store_name = serializers.CharField(source='store.name', read_only=True)
-    product_name = serializers.CharField(source='product.name', read_only=True)
-    product_color = serializers.CharField(source='product.get_color_display', read_only=True)
+    # We no longer need a separate product_name, as it will be inside the 'product' object.
+    # product_name = serializers.CharField(source='product.name', read_only=True)
     username = serializers.CharField(source='user.username', read_only=True)
     
+    # ⭐ THE KEY FIX IS HERE ⭐
+    # This tells DRF to use the ProductSerializer to create a full nested object
+    # for the 'product' field, instead of just its ID.
+    product = ProductSerializer(read_only=True)
+
     class Meta:
         model = Price
         fields = [
-            'id', 'product', 'product_name', 'product_color',
-            'store', 'store_name', 'price', 'user', 'username', 
-            'created_at', 'date'
+            'id', 
+            'product',        # This will now be the full product object
+            'store', 
+            'store_name', 
+            'price', 
+            'user', 
+            'username', 
+            'created_at', 
+            'date'
         ]
         read_only_fields = ['created_at', 'user', 'username']
+    
+    def validate_price(self, value):
+        """Ensure price is positive"""
+        if value <= 0:
+            raise serializers.ValidationError("Price must be greater than zero")
+        return value
+
+# ⭐ --- START OF FIX --- ⭐
+class PriceCreationSerializer(serializers.ModelSerializer):
+    """
+    This serializer is specifically for CREATING a new price.
+    It correctly accepts the primary keys (IDs) for product and store.
+    """
+    # We expect the frontend to send the ID for the product and store.
+    product = serializers.PrimaryKeyRelatedField(queryset=Product.objects.all())
+    store = serializers.PrimaryKeyRelatedField(queryset=Store.objects.all())
+
+    class Meta:
+        model = Price
+        fields = ['product', 'store', 'price', 'date']
+
+    def create(self, validated_data):
+        # Associate the price with the currently logged-in user.
+        request = self.context.get('request')
+        if request and hasattr(request, 'user'):
+            validated_data['user'] = request.user
+        
+        # Check for existing price to prevent duplicates
+        # This is better done here than with a UniqueConstraint for a friendlier error.
+        existing_price = Price.objects.filter(
+            product=validated_data['product'],
+            store=validated_data['store'],
+            date=validated_data.get('date', timezone.now().date())
+        ).first()
+
+        if existing_price:
+            raise serializers.ValidationError({
+                'non_field_errors': ['A price for this product at this store has already been added today.']
+            })
+            
+        return Price.objects.create(**validated_data)
+# ⭐ --- END OF FIX --- ⭐
 
 class ProcessingJobSerializer(serializers.ModelSerializer):
     """Serializer for monitoring processing jobs"""
@@ -292,91 +402,3 @@ class ProcessingJobSerializer(serializers.ModelSerializer):
             'created_at', 'started_at', 'completed_at', 'processing_time',
             'result_data', 'can_retry'
         ]
-
-class ColorAnalysisSerializer(serializers.Serializer):
-    """Serializer for color analysis results"""
-    image = serializers.ImageField(write_only=True)
-    category = serializers.CharField(read_only=True)
-    confidence = serializers.FloatField(read_only=True)
-    dominant_colors = serializers.ListField(
-        child=serializers.ListField(child=serializers.IntegerField()),
-        read_only=True
-    )
-    color_votes = serializers.DictField(read_only=True)
-    display_name = serializers.CharField(read_only=True)
-
-class ProductColorStatsSerializer(serializers.Serializer):
-    """Serializer for color category statistics"""
-    color_category = serializers.CharField()
-    display_name = serializers.CharField()
-    count = serializers.IntegerField()
-    percentage = serializers.FloatField()
-    avg_confidence = serializers.FloatField()
-
-class ProductSimilaritySerializer(serializers.Serializer):
-    """Serializer for product similarity search results"""
-    query_image = serializers.ImageField(write_only=True)
-    color_filter = serializers.ChoiceField(
-        choices=Product.COLOR_CHOICES,
-        required=False,
-        help_text="Filter results by color category"
-    )
-    max_results = serializers.IntegerField(default=10, min_value=1, max_value=50)
-    include_similar_colors = serializers.BooleanField(default=True)
-    
-    # Read-only result fields
-    results = ProductSerializer(many=True, read_only=True)
-    query_color_info = serializers.DictField(read_only=True)
-    processing_time = serializers.FloatField(read_only=True)
-
-class BulkProductProcessingSerializer(serializers.Serializer):
-    """Serializer for bulk product processing requests"""
-    product_ids = serializers.ListField(
-        child=serializers.IntegerField(),
-        allow_empty=False,
-        max_length=100,
-        help_text="List of product IDs to process"
-    )
-    job_types = serializers.MultipleChoiceField(
-        choices=ProcessingJob.JOB_TYPES,
-        default=['color_analysis', 'visual_features'],
-        help_text="Types of processing to perform"
-    )
-    priority = serializers.IntegerField(default=0, help_text="Job priority")
-    force_reprocess = serializers.BooleanField(
-        default=False,
-        help_text="Reprocess even if already completed"
-    )
-
-# Enhanced views integration serializers
-class ProductRecommendationSerializer(serializers.Serializer):
-    """Serializer for product recommendations based on color and features"""
-    source_product_id = serializers.IntegerField()
-    max_recommendations = serializers.IntegerField(default=5, min_value=1, max_value=20)
-    color_weight = serializers.FloatField(
-        default=0.3, 
-        min_value=0.0, 
-        max_value=1.0,
-        help_text="Weight of color similarity in recommendations"
-    )
-    visual_weight = serializers.FloatField(
-        default=0.5,
-        min_value=0.0,
-        max_value=1.0,
-        help_text="Weight of visual similarity in recommendations"
-    )
-    text_weight = serializers.FloatField(
-        default=0.2,
-        min_value=0.0,
-        max_value=1.0,
-        help_text="Weight of text similarity in recommendations"
-    )
-    
-    def validate(self, data):
-        """Ensure weights sum to 1.0"""
-        total_weight = data['color_weight'] + data['visual_weight'] + data['text_weight']
-        if abs(total_weight - 1.0) > 0.01:
-            raise serializers.ValidationError(
-                "Color, visual, and text weights must sum to 1.0"
-            )
-        return data
